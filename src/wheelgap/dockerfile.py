@@ -50,6 +50,228 @@ _DIRECTIVES = {"syntax", "escape", "check"}  # the parser directives BuildKit kn
 # A Python import, e.g. inside a `RUN <<EOF` heredoc: never a valid FROM instruction.
 _PY_IMPORT_RE = re.compile(r"^from\s+\S+\s+import\s")
 
+_HEREDOC_DIRECTIVES = {"RUN", "COPY", "ADD"}
+_RE_HEREDOC = re.compile(r"^(\d*)<<(-?)\s*([^<]*)$")
+
+
+def _unquote_delimiter(rest: str, escape: str) -> str | None:
+    """Unquote a heredoc delimiter following BuildKit's shell lexer (RawQuotes=False)."""
+    out: list[str] = []
+    i = 0
+    n = len(rest)
+    in_quote: str | None = None
+    while i < n:
+        c = rest[i]
+        if in_quote == "'":
+            if c == "'":
+                in_quote = None
+            else:
+                out.append(c)
+            i += 1
+        elif in_quote == '"':
+            if c == '"':
+                in_quote = None
+                i += 1
+            elif c == escape:
+                i += 1
+                if i < n:
+                    if rest[i] in ('"', "$", "`", escape):
+                        out.append(rest[i])
+                    else:
+                        out.append(c)
+                        out.append(rest[i])
+                    i += 1
+            else:
+                out.append(c)
+                i += 1
+        else:
+            if c == "'":
+                in_quote = "'"
+                i += 1
+            elif c == '"':
+                in_quote = '"'
+                i += 1
+            elif c == escape:
+                i += 1
+                if i < n:
+                    out.append(rest[i])
+                    i += 1
+            elif c in (" ", "\t", "\r", "\n", "\v", "\f"):
+                return None  # more than one word
+            else:
+                out.append(c)
+                i += 1
+    if in_quote is not None:
+        return None
+    return "".join(out)
+
+
+def _lex_words(s: str, escape: str) -> list[str]:
+    """Split line into words matching BuildKit's shell.NewLex with RawQuotes=True, RawEscapes=True."""
+    words: list[str] = []
+    buf: list[str] = []
+    in_word = False
+    i = 0
+    n = len(s)
+
+    def add_raw_char(c: str) -> None:
+        nonlocal in_word
+        buf.append(c)
+        in_word = True
+
+    def add_char(c: str) -> None:
+        nonlocal in_word
+        if c in (" ", "\t", "\r", "\n", "\v", "\f") and in_word:
+            if buf:
+                words.append("".join(buf))
+                buf.clear()
+            in_word = False
+        elif c not in (" ", "\t", "\r", "\n", "\v", "\f"):
+            add_raw_char(c)
+
+    while i < n:
+        c = s[i]
+        if c == "<":
+            if i + 1 < n and s[i + 1] == "<":
+                i += 2
+                spaces: list[str] = []
+                while i < n and s[i] in (" ", "\t", "\r", "\n", "\v", "\f"):
+                    spaces.append(s[i])
+                    i += 1
+                heredoc_prefix = "<<" + "".join(spaces)
+                for hc in heredoc_prefix:
+                    add_raw_char(hc)
+                continue
+            add_char(c)
+            i += 1
+        elif c == "'":
+            add_raw_char(c)
+            i += 1
+            while i < n:
+                sc = s[i]
+                add_raw_char(sc)
+                i += 1
+                if sc == "'":
+                    break
+        elif c == '"':
+            add_raw_char(c)
+            i += 1
+            while i < n:
+                dc = s[i]
+                if dc == '"':
+                    add_raw_char(dc)
+                    i += 1
+                    break
+                if dc == escape:
+                    add_raw_char(dc)
+                    i += 1
+                    if i < n:
+                        add_raw_char(s[i])
+                        i += 1
+                else:
+                    add_raw_char(dc)
+                    i += 1
+        elif c == "$":
+            if i + 2 < n and s[i + 1 : i + 3] == "((":
+                depth = 1
+                start = i
+                i += 3
+                while i < n and depth > 0:
+                    if s[i : i + 2] == "((":
+                        depth += 1
+                        i += 2
+                    elif s[i : i + 2] == "))":
+                        depth -= 1
+                        i += 2
+                    else:
+                        i += 1
+                for sc in s[start:i]:
+                    add_char(sc)
+            elif i + 1 < n and s[i + 1] == "(":
+                depth = 1
+                start = i
+                i += 2
+                while i < n and depth > 0:
+                    if s[i] == "(":
+                        depth += 1
+                    elif s[i] == ")":
+                        depth -= 1
+                    i += 1
+                for sc in s[start:i]:
+                    add_char(sc)
+            else:
+                add_char(c)
+                i += 1
+        elif c == escape:
+            add_raw_char(c)
+            i += 1
+            if i < n:
+                add_raw_char(s[i])
+                i += 1
+        else:
+            add_char(c)
+            i += 1
+
+    if buf:
+        words.append("".join(buf))
+
+    return words
+
+
+def _heredocs(instruction: str, escape: str = "\\") -> list[tuple[str, bool]]:
+    """Return (delimiter, strip_tabs) for each heredoc in one shell-form RUN, COPY or ADD (or ONBUILD of those).
+
+    Follows BuildKit's frontend/dockerfile/parser/parser.go (canContainHeredoc, heredocsFromLine)
+    and frontend/dockerfile/shell/lex.go (processPossibleHeredoc) at commit cedaeca8850a2bb536bbd1db72419f3cf491bdb5:
+    https://github.com/moby/buildkit/blob/cedaeca8850a2bb536bbd1db72419f3cf491bdb5/frontend/dockerfile/parser/parser.go
+    """
+    stripped = instruction.strip()
+    if not stripped or "<<" not in stripped:
+        return []
+
+    tokens = stripped.split(None, 2)
+    if not tokens:
+        return []
+
+    cmd = tokens[0].upper()
+    rest_idx = 1
+    if cmd == "ONBUILD":
+        if len(tokens) < 2:
+            return []
+        cmd = tokens[1].upper()
+        rest_idx = 2
+
+    if cmd not in _HEREDOC_DIRECTIVES:
+        return []
+
+    parts = stripped.split(None, rest_idx)
+    args_str = parts[rest_idx] if len(parts) > rest_idx else ""
+    rem = args_str.strip()
+    while rem.startswith("--"):
+        split_flags = rem.split(None, 1)
+        if len(split_flags) > 1:
+            rem = split_flags[1].strip()
+        else:
+            rem = ""
+            break
+    if rem.startswith("["):
+        return []
+
+    words = _lex_words(stripped, escape)
+    docs: list[tuple[str, bool]] = []
+    for w in words:
+        m = _RE_HEREDOC.match(w)
+        if not m:
+            continue
+        strip_tabs = m.group(2) == "-"
+        rest = m.group(3)
+        if not rest:
+            continue
+        delim = _unquote_delimiter(rest, escape)
+        if delim is not None:
+            docs.append((delim, strip_tabs))
+    return docs
+
 
 def _escape_char(lines: list[str]) -> str:
     """The `# escape=` parser directive (\\ by default, ` on Windows images)."""

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from wheelgap.cli import main
-from wheelgap.dockerfile import DockerfileError, ImageTarget, last_from, parse_from, read_dockerfile
+from wheelgap.dockerfile import DockerfileError, ImageTarget, _heredocs, last_from, parse_from, read_dockerfile
 
 
 @pytest.mark.parametrize(
@@ -188,23 +188,41 @@ def test_scratch_after_stages_keeps_the_usual_error(tmp_path):
         read_dockerfile(_dockerfile(tmp_path, text))
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        "RUN echo $((1<<SHIFT))",
-        "RUN echo $((1 << BITS))",
-        'RUN python -c "print(1<<n)"',
-        "CMD cat <<EOF",
-        "ENV X=<<EOF",
-        'LABEL note="a<<b"',
-        'RUN ["sh", "-c", "cat <<EOF"]',
-        "RUN cat <<<word",
-    ],
-)
+_HEREDOC_LIKE_LINES = [
+    "RUN echo $((1<<SHIFT))",
+    "RUN echo $((1 << BITS))",
+    'RUN python -c "print(1<<n)"',
+    "CMD cat <<EOF",
+    "ENV X=<<EOF",
+    'LABEL note="a<<b"',
+    'RUN ["sh", "-c", "cat <<EOF"]',
+    "RUN cat <<<word",
+]
+
+
+@pytest.mark.parametrize("line", _HEREDOC_LIKE_LINES)
 def test_lines_with_heredoc_like_text_never_hide_the_final_from(tmp_path, line):
     # wheelgap doesn't parse heredocs, so whatever these mean to Docker, the final FROM is still found.
     text = f"FROM python:3.13-alpine AS base\n{line}\nFROM python:3.12-slim\n"
     assert read_dockerfile(_dockerfile(tmp_path, text)) == ImageTarget("3.12", "linux-x86_64")
+
+
+@pytest.mark.parametrize(
+    ("instruction", "escape", "expected"),
+    [
+        ("RUN <<EOF", "\\", [("EOF", False)]),
+        ("RUN <<-EOF", "\\", [("EOF", True)]),
+        ('RUN <<"EOF"', "\\", [("EOF", False)]),
+        (r"RUN <<\EOF", "\\", [("EOF", False)]),
+        ('RUN <<E"O"F', "\\", [("EOF", False)]),
+        ("RUN 2<<EOF", "\\", [("EOF", False)]),
+        ("COPY <<FILE1 <<FILE2 /dest", "\\", [("FILE1", False), ("FILE2", False)]),
+        ("RUN <<`EOF`", "`", [("EOF", False)]),
+        *[(line, "\\", []) for line in _HEREDOC_LIKE_LINES],
+    ],
+)
+def test_heredocs_parsing(instruction, escape, expected):
+    assert _heredocs(instruction, escape=escape) == expected
 
 
 def test_unknown_stage_lists_only_earlier_stages(tmp_path):
