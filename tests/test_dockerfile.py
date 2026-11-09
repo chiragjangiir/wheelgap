@@ -142,7 +142,7 @@ def test_cli_wheelgap_names_still_win_over_the_image(capsys, fixtures, tmp_path)
 
 def _dockerfile(tmp_path, text):
     path = tmp_path / "Dockerfile"
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")  # Docker reads UTF-8; Windows would otherwise write cp1252
     return path
 
 
