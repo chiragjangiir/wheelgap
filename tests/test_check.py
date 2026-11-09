@@ -156,7 +156,7 @@ def test_requirements_against_fake_index(fixtures, fake_pypi):
 def test_lookup_errors_are_unknown(fake_pypi):
     pkgs = [Package("doesnotexist", "1.0"), Package("fastlib", "9.9")]
     fill_all(pkgs)
-    assert [p.error for p in pkgs] == ["not on index", "not on index"]
+    assert [p.error for p in pkgs] == ["not on index", "version 9.9 not on index"]
     (t,) = build_targets(["3.13"], ["linux-x86_64"])
     rows = check([Source("x", pkgs)], [t])
     assert [r.results[t] for r in rows] == [Status.UNKNOWN, Status.UNKNOWN]
@@ -176,3 +176,116 @@ def test_pyodide_sdist_only_is_missing():
     assert status_for(["a-1.tar.gz"], lin) is Status.SOURCE
     assert status_for(["a-1.tar.gz"], py) is Status.MISSING  # no compiler in the browser
     assert status_for(["a-1-cp313-cp313-pyodide_2025_0_wasm32.whl", "a-1.tar.gz"], py) is Status.WHEEL
+
+
+def test_via_prefers_the_projects_own_dependency_over_a_group():
+    # numpy is a runtime dependency of the project and also listed in the dev group.
+    src = graph({"app": [("numpy", None)], "numpy": []}, root_edges=[("numpy", None, None)], root_groups={0: "dev"})
+    (t,) = build_targets(["3.13"], ["linux-x86_64"])
+    assert via(src, [t], "numpy") == {t: ["app", "numpy"]}
+
+
+def test_via_prefers_a_plain_requirement_over_a_group():
+    src = graph(
+        {"a": [("c", None)], "b": [("c", None)], "c": []},
+        root_edges=[("a", None, None), ("b", None, None)],
+        root_groups={0: "dev"},
+        roots=(),
+    )
+    (t,) = build_targets(["3.13"], ["linux-x86_64"])
+    assert via(src, [t], "c") == {t: ["b", "c"]}
+
+
+def test_markers_wheelgap_cannot_know_count_as_needed():
+    (t,) = build_targets(["3.13"], ["linux-x86_64"])
+    # uv writes [tool.uv] conflicts as extra == '...' terms; installers know the OS release, we don't.
+    for marker in ("extra == 'extra-7-proj-cu124'", "platform_release >= '20.0'", "'docs' in dependency_groups"):
+        assert marker_holds(marker, t), marker
+    assert not marker_holds("sys_platform == 'win32'", t)
+
+
+def test_more_sdist_formats():
+    (t,) = build_targets(["3.13"], ["linux-x86_64"])
+    assert status_for(["foo-1.0.tar"], t) is Status.SOURCE
+    assert status_for(["foo-1.0.tar.lz"], t) is Status.SOURCE
+
+
+def test_yanked_files_count_only_when_every_usable_file_is_yanked():
+    lin, win = build_targets(["3.13"], ["linux-x86_64", "win-amd64"])
+    files = ["foo-2.0-cp313-cp313-manylinux_2_17_x86_64.whl", "foo-2.0-cp313-cp313-win_amd64.whl"]
+    yanked = frozenset({files[0]})
+    # Only the Linux wheel is yanked: pip on Linux has nothing else, so it installs the yanked wheel.
+    assert status_for(files, lin, yanked=yanked) is Status.WHEEL
+    assert status_for(files + ["foo-2.0.tar.gz"], lin, yanked=yanked) is Status.SOURCE  # a live sdist wins
+    assert status_for(files, win, yanked=yanked) is Status.WHEEL
+
+
+def test_unknowable_markers_still_respect_the_platform_part():
+    lin, mac, win = build_targets(["3.13"], ["linux-x86_64", "macos-arm64", "win-amd64"])
+    cpu = "sys_platform != 'darwin' and extra == 'extra-7-proj-cpu'"  # uv conflicts (torch cpu/cu124)
+    assert marker_holds(cpu, lin) and not marker_holds(cpu, mac)
+    cuda = "sys_platform == 'win32' and 'cuda' in extras"  # pylock.toml
+    assert marker_holds(cuda, win) and not marker_holds(cuda, lin)
+    pyobjc = "sys_platform == 'darwin' and platform_release >= '20.0'"
+    assert marker_holds(pyobjc, mac) and not marker_holds(pyobjc, lin)
+
+
+def test_three_valued_markers_from_the_review():
+    lin, mac = build_targets(["3.13"], ["linux-x86_64", "macos-arm64"])
+    for marker, on_linux, on_mac in [
+        ("'cuda' in extras and 'cpu' not in extras", True, True),  # conflicting extras: unknown, so needed
+        ("platform_release >= '20' and platform_release < '23'", True, True),
+        ("sys_platform == 'linux' and 'microsoft' in platform_release", True, False),  # WSL check
+        ("extra == 'a' and extra == 'b'", True, True),
+        ("sys_platform == 'darwin' and extra == 'gpu' or python_version < '3.9'", False, True),
+        ("(sys_platform == 'win32' or extra == 'x') and python_version >= '3.10'", True, True),
+        ("sys_platform == 'win32' and python_version >= '3.10'", False, False),
+    ]:
+        assert marker_holds(marker, lin) is on_linux, (marker, "linux")
+        assert marker_holds(marker, mac) is on_mac, (marker, "mac")
+
+
+def test_marker_values_with_quotes_are_not_misread(monkeypatch):
+    from packaging._parser import Value
+
+    # packaging before 26.3 always re-serialised values in double quotes; wheelgap must not rely on
+    # serialize() picking the right quotes, or this marker reads as "x" and "win32" and turns False.
+    monkeypatch.setattr(Value, "serialize", lambda self: f'"{self.value}"')
+    (lin,) = build_targets(["3.13"], ["linux-x86_64"])
+    assert marker_holds("""sys_platform != 'x" and sys_platform == "win32'""", lin)
+
+
+def test_explain_plain_linux_wheel_on_musl_and_ordering():
+    from wheelgap.check import explain, rejection
+
+    (musl,) = build_targets(["3.13"], ["musl-armv7l"])
+    assert rejection("grpcio-1.85.1-cp313-cp313-linux_armv7l.whl", musl) == (
+        "linux_armv7l is a plain Linux (glibc) build; wheelgap only counts musllinux wheels for musl"
+    )
+    files = ["x-1-cp313-abi3-macosx_11_0_universal2.whl", "x-1-cp313-cp313-linux_armv7l.whl"]
+    # The same-arch Linux wheel comes first; a macOS universal2 wheel isn't "same arch" on Linux.
+    assert [f for f, _ in explain(files, musl)][0] == "x-1-cp313-cp313-linux_armv7l.whl"
+
+
+def test_mobile_explain_reasons_and_sdists():
+    from wheelgap.check import rejection
+
+    (ios,) = build_targets(["3.13"], ["ios"])
+    (android,) = build_targets(["3.13"], ["android"])
+    assert rejection("x-1-cp313-cp313-ios_15_0_arm64_iphoneos.whl", ios) == (
+        "ios_15_0_arm64_iphoneos needs iOS 15.0, newer than 13.0 (--ios)"
+    )
+    assert rejection("x-1-cp313-cp313-android_26_arm64_v8a.whl", android) == (
+        "android_26_arm64_v8a needs Android API level 26, newer than 24 (--android-api)"
+    )
+    assert rejection("x-1-cp313-cp313-ios_11_0_arm64_iphoneos.whl", ios) == (
+        "ios_11_0_arm64_iphoneos is older than iOS 12.0, the oldest pip accepts"
+    )
+    assert rejection("x-1-cp313-cp313-ios_12_10_arm64_iphoneos.whl", ios) == (
+        "ios_12_10_arm64_iphoneos isn't one of the iOS versions pip tries for 13.0 (x.0 to x.9 of each older release)"
+    )
+    assert rejection("x-1-cp313-cp313-android_15_arm64_v8a.whl", android) == (
+        "android_15_arm64_v8a is older than API level 16, the oldest pip accepts"
+    )
+    # Mobile installs can't build sdists, so an sdist alone is "can't install", not "from source".
+    assert status_for(["x-1.0.tar.gz"], ios) is Status.MISSING

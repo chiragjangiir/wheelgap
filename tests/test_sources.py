@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+from wheelgap.check import Status, check
 from wheelgap.sources import SourceError, find_lockfile, load_inputs, parse_requirements
+from wheelgap.targets import build_targets
 
 
 def by_name(source):
@@ -55,6 +57,34 @@ def test_pdm_lock(fixtures, input_name):
     assert pkgs["backport"].markers == ["python_version < '3.13'"]
     assert pkgs["localpkg"].skip == "path"
     assert all(p.origin == "pdm.lock" for p in src.packages)
+
+
+def test_pdm_lock_legacy_metadata_files(tmp_path, fake_pypi):
+    path = tmp_path / "pdm.lock"
+    lock = (
+        '[metadata]\nlock_version = "3.0"\n\n'
+        '[[package]]\nname = "oldpkg"\nversion = "1.0"\n\n'
+        '[[package]]\nname = "newpkg"\nversion = "2.0"\n\n'
+        '[[package]]\nname = "jinja2"\nversion = "3.1.2"\n\n'
+        "[metadata.files]\n"
+        '"oldpkg 1.0" = [\n'
+        '    {file = "oldpkg-1.0-py3-none-any.whl", hash = "sha256:00"},\n'
+        "]\n"
+        '"Jinja2 3.1.2" = [\n'
+        '    {url = "https://files.pythonhosted.org/packages/Jinja2-3.1.2-py3-none-any.whl", hash = "sha256:00"},\n'
+        "]\n"
+    )
+    path.write_text(lock, encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert pkgs["oldpkg"].files == ["oldpkg-1.0-py3-none-any.whl"]
+    assert pkgs["newpkg"].files is None  # not in metadata.files either: fall back to PyPI
+    assert pkgs["jinja2"].files == ["Jinja2-3.1.2-py3-none-any.whl"]  # normalized-name fallback
+    from wheelgap.pypi import fill_all
+
+    fill_all(src.packages)
+    # Only the package missing from [metadata.files] is looked up on the index.
+    assert fake_pypi and all("/newpkg/" in url for url in fake_pypi)
 
 
 def test_pylock(fixtures):
@@ -186,3 +216,246 @@ def test_find_lockfile_requirements_lock(tmp_path):
     (tmp_path / "requirements.lock").write_text("numpy==2.0.0\n", encoding="utf-8")
     found = find_lockfile(tmp_path)
     assert found.name == "requirements.lock"
+
+
+def test_pdm_lock_extras_variants_count_once(tmp_path):
+    # PDM writes one entry per extras variant (seen in PDM's own lockfile for coverage[toml]).
+    (tmp_path / "pdm.lock").write_text(
+        '[[package]]\nname = "coverage"\nversion = "7.13.5"\nmarker = "sys_platform == \'linux\'"\n'
+        'files = [{file = "coverage-7.13.5.tar.gz", hash = "sha256:00"}]\n\n'
+        '[[package]]\nname = "coverage"\nversion = "7.13.5"\nextras = ["toml"]\n'
+        'files = [{file = "coverage-7.13.5.tar.gz", hash = "sha256:00"}]\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    assert [(p.name, p.version) for p in src.packages] == [("coverage", "7.13.5")]
+    assert src.packages[0].markers is None  # the unconditional variant wins
+
+
+def test_requirements_bare_vcs_urls_are_skipped(tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_text(
+        "git+ssh://git@github.com/org/repo.git#egg=foo\n"  # the "@" in git@ used to abort the whole run
+        "hg+https://hg.example.com/bar#egg=bar&subdirectory=src\n"
+        "https://example.com/pkgs/baz-1.0.tar.gz\n"
+        "named @ git+https://github.com/org/named.git\n"
+        "requests==2.32.3\n",
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(path)])
+    got = {p.name: (p.skip, p.version) for p in src.packages}
+    assert got["foo"] == ("url", None) and got["bar"] == ("url", None)
+    assert got["https://example.com/pkgs/baz-1.0.tar.gz"] == ("url", None)
+    assert got["named"] == ("url", None)
+    assert got["requests"] == (None, "2.32.3")
+
+
+def test_uv_path_dependency_is_not_a_root(tmp_path):
+    # winhelper is a path dependency only installed on Windows; its own dependency must follow suit.
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "app"\nversion = "0"\nsource = { editable = "." }\n'
+        'dependencies = [{ name = "winhelper", marker = "sys_platform == \'win32\'" }]\n\n'
+        '[[package]]\nname = "winhelper"\nversion = "1"\nsource = { directory = "libs/winhelper" }\n'
+        'dependencies = [{ name = "pywin32" }]\n\n'
+        '[[package]]\nname = "pywin32"\nversion = "311"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'wheels = [{ url = "https://files.pythonhosted.org/p/pywin32-311-cp313-cp313-win_amd64.whl" }]\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    lin, win = build_targets(["3.13"], ["linux-x86_64", "win-amd64"])
+    rows = {r.package.name: r for r in check([src], [lin, win])}
+    assert rows["pywin32"].results == {lin: Status.NOT_NEEDED, win: Status.WHEEL}
+
+
+def test_poetry_dict_markers_with_an_unconditional_group(tmp_path):
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\ngroups = ["main", "dev"]\n'
+        'markers = { main = "sys_platform == \\"win32\\"" }\nfiles = []\n\n[metadata]\nlock-version = "2.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    assert src.packages[0].markers is None  # dev always installs it, so it's needed everywhere
+
+
+def test_poetry_1x_lock_walks_dependency_markers(tmp_path):
+    # Before lock-version 2.1, markers only sit on dependency edges.
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "app-lib"\nversion = "1.0"\n\n[package.dependencies]\n'
+        'pywin32 = {version = ">=300", markers = "sys_platform == \\"win32\\""}\nrequests = "*"\n\n'
+        '[[package]]\nname = "pywin32"\nversion = "306"\nfiles = []\n\n'
+        '[[package]]\nname = "requests"\nversion = "2.32.3"\nfiles = []\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    lin, win = build_targets(["3.13"], ["linux-x86_64", "win-amd64"])
+    rows = {r.package.name: r for r in check([src], [lin, win])}
+    assert rows["pywin32"].results[lin] is Status.NOT_NEEDED  # used to be a false "missing" on Linux
+    assert rows["pywin32"].results[win] is not Status.NOT_NEEDED
+    assert rows["requests"].results[lin] is not Status.NOT_NEEDED
+
+
+def test_poetry_package_without_files_is_looked_up(tmp_path):
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "x"\nversion = "1"\n\n[metadata]\nlock-version = "2.1"\n'
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    assert src.packages[0].files is None  # not [] (which would mean "can't install")
+
+
+def test_requirements_parsing_edge_cases(tmp_path):
+    (tmp_path / "more.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text(
+        "-rmore.txt\n"  # no space: used to be silently dropped
+        "fastlib==2.0.0 \\\n    --hash sha256:00\n"  # --hash with a space used to abort the run
+        "nowheels==0.9\t# a comment after a tab used to abort the run\n"
+        "requests==2.32.3\t# see https://docs.python-requests.org\n"  # used to be skipped as a URL
+        "named@https://example.com/named-1.0.tar.gz\n"
+        "git+https://example.com/repo.git#subdirectory=src&egg=deep ; python_version >= '3.10'\n",
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path / "requirements.txt")])
+    got = {p.name: (p.version, p.skip) for p in src.packages}
+    assert got["purewheel"] == ("3.1", None)
+    assert got["fastlib"] == ("2.0.0", None)
+    assert got["nowheels"] == ("0.9", None)
+    assert got["requests"] == ("2.32.3", None)
+    assert got["named"] == (None, "url")
+    assert got["deep"] == (None, "url")
+
+
+def test_poetry_1x_dependency_cycle_is_still_walked(tmp_path):
+    # sphinx and sphinxcontrib-applehelp depend on each other, so neither is "depended on by nothing".
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "requests"\nversion = "2.32.3"\nfiles = []\n\n'
+        '[[package]]\nname = "sphinx"\nversion = "7.2.6"\nfiles = []\n\n[package.dependencies]\n'
+        '"sphinxcontrib-applehelp" = "*"\ndocutils = ">=0.18"\n\n'
+        '[[package]]\nname = "sphinxcontrib-applehelp"\nversion = "1.0.8"\nfiles = []\n\n'
+        '[package.dependencies]\nSphinx = ">=5"\n\n'
+        '[[package]]\nname = "docutils"\nversion = "0.20.1"\nfiles = []\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (lin,) = build_targets(["3.13"], ["linux-x86_64"])
+    rows = {r.package.name: r.results[lin] for r in check([src], [lin])}
+    assert all(s is not Status.NOT_NEEDED for s in rows.values()), rows  # docutils used to be "n/a"
+
+
+def test_poetry_1x_edges_pick_the_version_in_range(tmp_path):
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "app-lib"\nversion = "1.0"\nfiles = []\n\n[package.dependencies]\n'
+        'numpy = [{version = "1.24.4", markers = "python_version < \\"3.9\\""}, '
+        '{version = ">=1.26", markers = "python_version >= \\"3.9\\""}]\n\n'
+        '[[package]]\nname = "numpy"\nversion = "1.24.4"\nfiles = []\n\n'
+        '[[package]]\nname = "numpy"\nversion = "1.26.4"\nfiles = []\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (t,) = build_targets(["3.12"], ["linux-x86_64"])
+    got = {(r.package.name, r.package.version): r.results[t] for r in check([src], [t])}
+    assert got[("numpy", "1.24.4")] is Status.NOT_NEEDED  # only for Python < 3.9
+    assert got[("numpy", "1.26.4")] is not Status.NOT_NEEDED
+
+
+def test_pipfile_lock_vcs_skipped(tmp_path):
+    path = tmp_path / "Pipfile.lock"
+    lock = {
+        "default": {
+            "hgpkg": {"hg": "https://hg.example.com/repo"},
+            "svnpkg": {"svn": "svn://svn.example.com/repo"},
+            "bzrpkg": {"bzr": "lp:mybranch"},
+        }
+    }
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert pkgs["hgpkg"].skip == "hg"
+    assert pkgs["svnpkg"].skip == "svn"
+    assert pkgs["bzrpkg"].skip == "bzr"
+
+
+def test_pdm_lock_vcs_skipped(tmp_path):
+    path = tmp_path / "pdm.lock"
+    lock = (
+        'version = "4.5"\n\n'
+        '[[package]]\nname = "hgpkg"\nversion = "0.1"\nhg = "https://hg.example.com/repo"\n\n'
+        '[[package]]\nname = "svnpkg"\nversion = "0.1"\nsvn = "svn://svn.example.com/repo"\n\n'
+        '[[package]]\nname = "bzrpkg"\nversion = "0.1"\nbzr = "lp:mybranch"\n'
+    )
+    path.write_text(lock, encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert pkgs["hgpkg"].skip == "hg"
+    assert pkgs["svnpkg"].skip == "svn"
+    assert pkgs["bzrpkg"].skip == "bzr"
+
+
+def test_poetry_lock_vcs_skipped(tmp_path):
+    path = tmp_path / "poetry.lock"
+    lock = (
+        '[[package]]\nname = "hgpkg"\nversion = "0.1"\n[package.source]\ntype = "hg"\n\n'
+        '[[package]]\nname = "svnpkg"\nversion = "0.1"\n[package.source]\ntype = "svn"\n\n'
+        '[[package]]\nname = "bzrpkg"\nversion = "0.1"\n[package.source]\ntype = "bzr"\n'
+    )
+    path.write_text(lock, encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert pkgs["hgpkg"].skip == "hg"
+    assert pkgs["svnpkg"].skip == "svn"
+    assert pkgs["bzrpkg"].skip == "bzr"
+
+
+def test_poetry_1x_roots_are_cycles_nothing_else_reaches(tmp_path):
+    # a1<->a2 and z1<->z2 are cycles; z1 -> a1 only on Windows. Only the z cycle is a starting point,
+    # so a1/a2 must not be needed on Linux (they used to be made roots too, by index order).
+    pkg = '[[package]]\nname = "{n}"\nversion = "1"\nfiles = []\n\n[package.dependencies]\n{deps}\n\n'
+    lock = (
+        pkg.format(n="a1", deps='a2 = "*"')
+        + pkg.format(n="a2", deps='a1 = "*"')
+        + pkg.format(n="z1", deps='z2 = "*"\na1 = {version = "*", markers = "sys_platform == \\"win32\\""}')
+        + pkg.format(n="z2", deps='z1 = "*"')
+        + '[metadata]\nlock-version = "1.1"\n'
+    )
+    (tmp_path / "poetry.lock").write_text(lock, encoding="utf-8")
+    (src,) = load_inputs([str(tmp_path)])
+    lin, win = build_targets(["3.13"], ["linux-x86_64", "win-amd64"])
+    rows = {r.package.name: r.results for r in check([src], [lin, win])}
+    assert rows["a1"][lin] is Status.NOT_NEEDED and rows["a2"][lin] is Status.NOT_NEEDED
+    assert rows["a1"][win] is not Status.NOT_NEEDED and rows["z1"][lin] is not Status.NOT_NEEDED
+
+
+def test_poetry_1x_direct_dependency_from_pyproject_is_a_root(tmp_path):
+    # colorama is a direct dependency, and click also needs it on Windows only.
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\npython = "^3.10"\nclick = "*"\ncolorama = "*"\n', encoding="utf-8"
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "click"\nversion = "8.1.7"\nfiles = []\n\n[package.dependencies]\n'
+        'colorama = {version = "*", markers = "platform_system == \\"Windows\\""}\n\n'
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\nfiles = []\n\n[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (lin,) = build_targets(["3.13"], ["linux-x86_64"])
+    rows = {r.package.name: r.results[lin] for r in check([src], [lin])}
+    assert rows["colorama"] is not Status.NOT_NEEDED
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        'project = "x"\n',
+        '[tool.poetry.group]\ndev = "x"\n',
+        "[project]\ndependencies = [1]\n",
+        b"\xff\xfe".decode("latin-1"),
+    ],
+)
+def test_odd_pyproject_never_breaks_a_poetry_run(tmp_path, pyproject):
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="latin-1")
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "x"\nversion = "1"\nfiles = []\n\n[metadata]\nlock-version = "1.1"\n', encoding="utf-8"
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    assert [p.name for p in src.packages] == ["x"]

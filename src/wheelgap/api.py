@@ -20,7 +20,16 @@ from pathlib import Path
 from .check import Row, Status, check, status_for, wheel_tags
 from .pypi import fill_all
 from .sources import Package, Source, find_lockfile, load_file
-from .targets import DEFAULT_GLIBC, DEFAULT_MACOS, DEFAULT_MUSL, DEFAULT_PLATFORMS, Target, build_targets
+from .targets import (
+    DEFAULT_ANDROID_API,
+    DEFAULT_GLIBC,
+    DEFAULT_IOS,
+    DEFAULT_MACOS,
+    DEFAULT_MUSL,
+    DEFAULT_PLATFORMS,
+    Target,
+    build_targets,
+)
 
 _OK = (Status.WHEEL, Status.NOT_NEEDED, Status.BUNDLED)
 
@@ -38,11 +47,13 @@ def make_targets(
     glibc: str = DEFAULT_GLIBC,
     musl: str = DEFAULT_MUSL,
     macos: str = DEFAULT_MACOS,
+    ios: str = DEFAULT_IOS,
+    android_api: str | int = DEFAULT_ANDROID_API,
 ) -> list[Target]:
-    """Targets from the same names the CLI takes: python="3.13,3.14t", platforms=["all", "pyodide"]."""
+    """Targets from the same names the CLI takes: python="3.13,3.14t", platforms=["all", "pyodide", "mobile"]."""
     pythons = [python] if isinstance(python, str) else list(python or [running_python()])
     plats = [platforms] if isinstance(platforms, str) else list(platforms or DEFAULT_PLATFORMS)
-    return build_targets(pythons, plats, glibc, musl, macos)
+    return build_targets(pythons, plats, glibc, musl, macos, ios, android_api)
 
 
 @dataclass(frozen=True)
@@ -65,8 +76,12 @@ class Result:
 
     @property
     def pure(self) -> bool:
-        """Has a wheel that works everywhere (e.g. py3-none-any)."""
-        return any(any(t.platform == "any" for t in tags) for tags in wheel_tags(list(self.files)))
+        """Has a Python 3 wheel that works on every platform (e.g. py3-none-any, but not py2-none-any)."""
+        return any(
+            t.platform == "any" and t.abi == "none" and t.interpreter.startswith(("py3", "cp3"))
+            for tags in wheel_tags(list(self.files))
+            for t in tags
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -96,7 +111,9 @@ def check_packages(
     for p in pkgs:
         p.origin = "api"
     fill_all(pkgs, workers=workers)
-    return [_result(p, {t: status_for(None if p.error else p.files, t) for t in targets}) for p in pkgs]
+    return [
+        _result(p, {t: status_for(None if p.error else p.files, t, yanked=p.yanked) for t in targets}) for p in pkgs
+    ]
 
 
 def check_package(
