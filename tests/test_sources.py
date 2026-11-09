@@ -196,6 +196,10 @@ def test_bad_requirement():
 def test_pipfile_lock_custom_categories(tmp_path):
     path = tmp_path / "Pipfile.lock"
     lock = {
+        "docs": {
+            "sphinx": {"version": "==7.2.6"},
+            "furo": {"version": "==2024.1.29"},
+        },
         "_meta": {"sources": []},
         "default": {
             "requests": {"version": "==2.31.0"},
@@ -203,10 +207,6 @@ def test_pipfile_lock_custom_categories(tmp_path):
         },
         "develop": {
             "pytest": {"version": "==8.0.0"},
-        },
-        "docs": {
-            "sphinx": {"version": "==7.2.6"},
-            "furo": {"version": "==2024.1.29"},
         },
         "tests": {
             "pytest-cov": {"version": "==4.1.0"},
@@ -222,6 +222,14 @@ def test_pipfile_lock_custom_categories(tmp_path):
         ("pytest-cov", "4.1.0"),
     ]
     assert len(src.packages) == 5
+
+
+def test_pipfile_lock_malformed_package_entry_raises(tmp_path):
+    path = tmp_path / "Pipfile.lock"
+    lock = {"default": {"requests": "==2.31.0"}}
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    with pytest.raises(SourceError, match="isn't a package entry"):
+        load_inputs([str(path)])
 
 
 def test_pdm_lock_extras_variants_count_once(tmp_path):
