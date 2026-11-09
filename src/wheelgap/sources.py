@@ -435,10 +435,10 @@ def load_file(path: Path) -> Source:
         return PARSERS[name](path)
     if name.startswith("pylock.") and name.endswith(".toml"):
         return parse_pylock(path)
-    if name.endswith(".lock") and "uv" in name:
-        return parse_uv_lock(path)
     if name.startswith("requirements") and name.endswith(".lock"):
         return parse_requirements(path)
+    if name.endswith(".lock") and "uv" in name:
+        return parse_uv_lock(path)
     if name.endswith((".txt", ".in")):
         return parse_requirements(path)
     raise SourceError(

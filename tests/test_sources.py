@@ -212,6 +212,15 @@ def test_requirements_dev_lock(tmp_path):
     assert pkgs["pytest"].version == "8.3.5"
 
 
+def test_requirements_uvicorn_lock(tmp_path):
+    path = tmp_path / "requirements-uvicorn.lock"
+    path.write_text("uvicorn==0.34.0\n", encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert src.label == "requirements-uvicorn.lock"
+    assert pkgs["uvicorn"].version == "0.34.0"
+
+
 def test_find_lockfile_requirements_lock(tmp_path):
     (tmp_path / "requirements.lock").write_text("numpy==2.0.0\n", encoding="utf-8")
     found = find_lockfile(tmp_path)
