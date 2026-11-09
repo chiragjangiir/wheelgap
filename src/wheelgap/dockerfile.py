@@ -77,7 +77,7 @@ def _from_lines(text: str) -> list[str]:
     so a line in one that looks exactly like a FROM instruction (say, SQL's `FROM base` naming a
     stage) is still read as one: a known limit, pass -p/-t for such Dockerfiles.
     """
-    lines = [raw.rstrip("\r") for raw in text.splitlines()]
+    lines = [raw[:-1] if raw.endswith("\r") else raw for raw in text.split("\n")]
     esc = re.escape(_escape_char(lines))
     continued = re.compile(rf"(?<!{esc}){esc}[ \t]*$")  # one escape char at the end, not two
     found = []
@@ -85,7 +85,7 @@ def _from_lines(text: str) -> list[str]:
 
     def finish(instruction: str, joined: bool) -> None:
         # Docker splits the keyword off on ASCII whitespace only, so `FROM<U+00A0>python` isn't a FROM to it.
-        words = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
+        words = re.split(r"[ \t]+", instruction, maxsplit=1)
         if words[0].upper() != "FROM" and re.match(r"(?i)FROM\s", words[0]) and not _PY_IMPORT_RE.match(instruction):
             raise DockerfileError(
                 f"unknown instruction {words[0]!r} (Docker splits instructions on ASCII whitespace only)"
@@ -150,8 +150,8 @@ def _unquote(value: str, args: str) -> str:
 
 def _split_from(args: str) -> tuple[str, str | None, str | None]:
     """`[--platform=P] image [AS name]` -> (image, platform, stage name), rejecting what Docker rejects."""
-    stripped = args.strip(" \t\v\f\r")
-    words = re.split(r"[ \t\v\f\r]+", stripped) if stripped else []
+    stripped = args.strip(" \t")
+    words = re.split(r"[ \t]+", stripped) if stripped else []
     platform = None
     seen_platform = False
     while words and words[0].startswith("--"):
@@ -266,7 +266,7 @@ def parse_image(image: str, platform: str | None = None) -> ImageTarget:
 
 def read_dockerfile(path: Path) -> ImageTarget:
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        text = path.read_bytes().decode("utf-8-sig")
     except UnicodeDecodeError as e:
         byte = f"0x{e.object[e.start]:02x}"
         raise DockerfileError(f"{path}: not UTF-8 (byte {byte} at offset {e.start}), pass -p/-t instead") from None

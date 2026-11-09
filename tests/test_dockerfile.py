@@ -314,11 +314,20 @@ def test_escape_directive_rules(tmp_path):
         ("FROM\u00a0python:3.13\n", "unknown instruction"),  # not a FROM to Docker at all
         ("FROM\u00a0--platform=linux/arm64 python:3.13\n", "unknown instruction"),
         ("FROM python:3.12\nFROM\u00a0python:3.13\n", "unknown instruction"),  # mustn't fall back to 3.12
+        ("FROM python:3.13\vAS build\n", "expected 'IMAGE' or 'IMAGE AS NAME'"),
+        ("FROM python:3.12\x85FROM python:3.13\n", "expected 'IMAGE' or 'IMAGE AS NAME'"),
+        ("FROM python:3.12\rFROM python:3.13", "expected 'IMAGE' or 'IMAGE AS NAME'"),
     ],
 )
 def test_dockerfiles_docker_rejects(tmp_path, text, message):
     with pytest.raises(DockerfileError, match=message):
         read_dockerfile(_dockerfile(tmp_path, text))
+
+
+def test_crlf_dockerfile_parses(tmp_path):
+    path = tmp_path / "Dockerfile"
+    path.write_bytes(b"FROM python:3.13-alpine\r\nRUN echo hello\r\n")
+    assert read_dockerfile(path) == ImageTarget("3.13", "musl-x86_64", musl="1.2")
 
 
 def test_dockerfile_that_is_not_utf8_is_a_clear_error(tmp_path):
