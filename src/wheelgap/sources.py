@@ -11,7 +11,15 @@ from urllib.parse import unquote, urlparse
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
-LOCKFILES = ("uv.lock", "pylock.toml", "poetry.lock", "pdm.lock", "Pipfile.lock", "requirements.txt")
+LOCKFILES = (
+    "uv.lock",
+    "pylock.toml",
+    "poetry.lock",
+    "pdm.lock",
+    "Pipfile.lock",
+    "requirements.txt",
+    "requirements.lock",
+)
 
 
 class SourceError(ValueError):
@@ -256,11 +264,13 @@ def load_file(path: Path) -> Source:
         return parse_pylock(path)
     if name.endswith(".lock") and "uv" in name:
         return parse_uv_lock(path)
+    if name.startswith("requirements") and name.endswith(".lock"):
+        return parse_requirements(path)
     if name.endswith((".txt", ".in")):
         return parse_requirements(path)
     raise SourceError(
         f"don't know how to read {path} "
-        "(expected uv.lock, pylock.toml, poetry.lock, pdm.lock, Pipfile.lock or requirements.txt)"
+        "(expected uv.lock, pylock.toml, poetry.lock, pdm.lock, Pipfile.lock, requirements.lock or requirements.txt)"
     )
 
 

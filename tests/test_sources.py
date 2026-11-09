@@ -161,3 +161,28 @@ def test_no_lockfile_in_dir(fixtures):
 def test_bad_requirement():
     with pytest.raises(SourceError):
         load_inputs(["not a valid ! spec"])
+
+
+def test_requirements_lock(tmp_path):
+    path = tmp_path / "requirements.lock"
+    path.write_text("fastlib==2.0.0\nwinonly==3.11 ; sys_platform == 'win32'\n", encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert src.label == "requirements.lock"
+    assert pkgs["fastlib"].version == "2.0.0"
+    assert pkgs["winonly"].markers == ['sys_platform == "win32"']
+
+
+def test_requirements_dev_lock(tmp_path):
+    path = tmp_path / "requirements-dev.lock"
+    path.write_text("pytest==8.3.5\n", encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    pkgs = by_name(src)
+    assert src.label == "requirements-dev.lock"
+    assert pkgs["pytest"].version == "8.3.5"
+
+
+def test_find_lockfile_requirements_lock(tmp_path):
+    (tmp_path / "requirements.lock").write_text("numpy==2.0.0\n", encoding="utf-8")
+    found = find_lockfile(tmp_path)
+    assert found.name == "requirements.lock"
