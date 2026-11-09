@@ -309,6 +309,8 @@ def test_escape_directive_rules(tmp_path):
         ("FROM python:3.13 AS 1build\n", "invalid stage name '1build'"),
         ("FROM python:3.13 AS my@stage\n", "invalid stage name 'my@stage'"),
         ("FROM python:3.13 AS 1build\nFROM python:3.12\n", "invalid stage name '1build'"),  # any stage, as in Docker
+        ("FROM --platform=linux/arm64\u00a0python:3.13\n", "no image"),
+        ("FROM python:3.13 AS\u00a0stage\n", "expected 'IMAGE' or 'IMAGE AS NAME'"),
     ],
 )
 def test_dockerfiles_docker_rejects(tmp_path, text, message):

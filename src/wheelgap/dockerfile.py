@@ -145,7 +145,8 @@ def _unquote(value: str, args: str) -> str:
 
 def _split_from(args: str) -> tuple[str, str | None, str | None]:
     """`[--platform=P] image [AS name]` -> (image, platform, stage name), rejecting what Docker rejects."""
-    words = args.split()
+    stripped = args.strip(" \t\v\f\r")
+    words = re.split(r"[ \t\v\f\r]+", stripped) if stripped else []
     platform = None
     seen_platform = False
     while words and words[0].startswith("--"):
