@@ -161,3 +161,34 @@ def test_no_lockfile_in_dir(fixtures):
 def test_bad_requirement():
     with pytest.raises(SourceError):
         load_inputs(["not a valid ! spec"])
+
+
+def test_pipfile_lock_custom_categories(tmp_path):
+    path = tmp_path / "Pipfile.lock"
+    lock = {
+        "_meta": {"sources": []},
+        "default": {
+            "requests": {"version": "==2.31.0"},
+            "sphinx": {"version": "==7.2.6"},
+        },
+        "develop": {
+            "pytest": {"version": "==8.0.0"},
+        },
+        "docs": {
+            "sphinx": {"version": "==7.2.6"},
+            "furo": {"version": "==2024.1.29"},
+        },
+        "tests": {
+            "pytest-cov": {"version": "==4.1.0"},
+        },
+    }
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    (src,) = load_inputs([str(path)])
+    assert [(p.name, p.version) for p in src.packages] == [
+        ("requests", "2.31.0"),
+        ("sphinx", "7.2.6"),
+        ("pytest", "8.0.0"),
+        ("furo", "2024.1.29"),
+        ("pytest-cov", "4.1.0"),
+    ]
+    assert len(src.packages) == 5

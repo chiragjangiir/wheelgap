@@ -167,13 +167,19 @@ def parse_pipfile_lock(path: Path) -> Source:
     data = json.loads(path.read_text(encoding="utf-8"))
     pkgs = []
     seen: dict[tuple[str, str | None], Package] = {}
-    for section in ("default", "develop"):
+    sections = [s for s in ("default", "develop") if s in data and isinstance(data[s], dict)]
+    for key, val in data.items():
+        if key != "_meta" and key not in ("default", "develop") and isinstance(val, dict):
+            sections.append(key)
+    for section in sections:
         for name, p in data.get(section, {}).items():
+            if not isinstance(p, dict):
+                continue
             version = p.get("version")
             pkg = Package(name, version.removeprefix("==") if version else None, origin=path.name)
             if p.get("markers"):
                 pkg.markers = [p["markers"]]
-            pkg.skip = next((kind for kind in ("git", "path", "file") if kind in p), None)
+            pkg.skip = next((kind for kind in ("git", "hg", "svn", "bzr", "path", "file") if kind in p), None)
             if pkg.skip is None and p.get("editable"):
                 pkg.skip = "editable"
             key = (canonicalize_name(name), pkg.version)
