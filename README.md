@@ -56,8 +56,9 @@ wheelgap pdm.lock -p 3.13 -t linux-x86_64,linux-aarch64
 # No lockfile? Check packages directly (latest version, or pin one)
 wheelgap psycopg2 uvloop numpy==2.3.4 -t windows,win-arm64
 
-# Take the target from the last FROM line (e.g. python:3.13-alpine
-# or ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim)
+# Take the target from the final stage's image (e.g. python:3.13-alpine
+# or ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim), following
+# named stages like `FROM base AS runtime` back to the image they start from
 wheelgap --dockerfile Dockerfile
 
 # Machine-readable, for scripts and CI
@@ -106,7 +107,7 @@ If you think wheelgap got a package wrong, that output (or `--json --explain`) i
 
 **Exit codes:** `0` no gaps, `1` gaps found, `2` bad input. `--exit-zero` always exits `0`. `--fail-on missing` (or `fail-on = "missing"` in `[tool.wheelgap]`) accepts source builds and only exits `1` when a package can't be installed at all.
 
-Use `-q` / `--quiet` (or `quiet = true` in `[tool.wheelgap]`) to show only the gap summary and package names. Clean runs are silent, JSON output is unchanged, and quiet mode cannot be combined with `--explain`.
+Use `-q` / `--quiet` (or `quiet = true` in `[tool.wheelgap]`) to show only the gap summary and package names. Clean runs are silent, JSON and Markdown output are unchanged, and quiet text output cannot be combined with `--explain` (`--json --explain` and `--markdown --explain` work).
 
 ### Targets
 
@@ -122,7 +123,15 @@ Run `wheelgap --list-targets` to see target aliases and compatibility limits, or
 | `macos-x86_64` | `macos-intel` | `macosx_*_x86_64` and `universal2` |
 | `win-amd64` | `windows`, `win` | `win_amd64` |
 | `win-arm64` | `windows-arm64` | `win_arm64` |
+| `linux-armv7l` | `linux-arm`, `linux-armv7`, `linux/arm/v7` | `manylinux_2_*_armv7l` (32-bit ARM, e.g. Raspberry Pi OS), legacy `manylinux2014`, and plain `linux_armv7l` (which PyPI allows for the Pi) |
+| `linux-ppc64le`, `linux-s390x`, `linux-riscv64` | `linux/ppc64le`, `linux/s390x`, `linux/riscv64` | `manylinux_2_*` for that arch (`riscv64` has no legacy `manylinux2014` tag) |
+| `musl-armv7l`, `musl-ppc64le`, `musl-s390x`, `musl-riscv64` | `alpine-armv7` | `musllinux_1_*` for that arch (pip would also take a plain `linux_armv7l` wheel on Alpine, but it's a glibc build, so wheelgap doesn't count it) |
 | `pyodide` | `wasm`, `wasm32`, `emscripten` | Pyodide's ABI for that Python: `pyodide_2024_0` (3.12), `pyodide_2025_0` / `pyemscripten_2025_0` (3.13), `pyemscripten_2026_0` (3.14) |
+| `ios-arm64` | `ios`, `iphoneos` | `ios_*_arm64_iphoneos` up to `--ios` (default 13.0) |
+| `ios-simulator-arm64`, `ios-simulator-x86_64` | `ios-simulator` | `ios_*_arm64_iphonesimulator` / `ios_*_x86_64_iphonesimulator` |
+| `android-arm64`, `android-x86_64` | `android` | `android_*_arm64_v8a` / `android_*_x86_64` up to `--android-api` (default 24) |
+
+**iOS and Android** (PEP 730 and PEP 738, Python 3.13+) are checked with `-t mobile` or by name, for apps built with tools like BeeWare's Briefcase. Mobile dependencies are installed by a cross-platform pip run that can only use wheels, so a package with only an sdist shows as `✗ missing`. `--ios` and `--android-api` (or `ios = "15.0"` and `android-api = 28` in `[tool.wheelgap]`) set your app's minimum iOS version and Android API level. wheelgap checks PyPI only: Briefcase and Chaquopy also install from their own package repositories (BeeWare's on anaconda.org, and chaquo.com), which have mobile builds of packages like numpy, so a `✗ missing` there may still install.
 
 **Pyodide (Python in the browser)** only installs wheels: there's no compiler, so a package with only an sdist shows as `✗ missing`, not `● source`. Pyodide wheels are tied to one ABI per Python version and don't work across them. Pyodide also ships its own builds of many popular packages (numpy, pydantic-core and others) that aren't on PyPI. Point `--pyodide-lock` at the release's `pyodide-lock.json` (a path or URL, also `pyodide-lock = "..."` in `[tool.wheelgap]`) and those count as `✓ bundled`, with a note when Pyodide's version differs from the one you pinned:
 
@@ -130,27 +139,29 @@ Run `wheelgap --list-targets` to see target aliases and compatibility limits, or
 wheelgap -p 3.12 -t pyodide --pyodide-lock https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide-lock.json
 ```
 
-Docker platform names also work with `-t`, for example `-t linux/amd64,linux/arm64` (also `linux/arm64/v8`).
+Docker platform names also work with `-t`, for example `-t linux/amd64,linux/arm64` (also `linux/arm64/v8`, `linux/arm/v7`, `linux/ppc64le`, `linux/s390x` and `linux/riscv64`).
 
-`-t all` checks the eight native platforms; Pyodide is only checked when you name it. Python versions take a trailing `t` for free-threaded builds (`3.14t`), which correctly rejects `abi3` wheels. Without `-p`, wheelgap reads a `.python-version` file next to the lockfile (or `pyproject.toml`) if there is one, and otherwise uses the Python it is running on.
+`-t all` checks the eight common native platforms, and `-t everything` adds the armv7l, ppc64le, s390x and riscv64 Linux targets (glibc and musl). Pyodide, iOS and Android are only checked when you name them. Python versions take a trailing `t` for free-threaded builds (`3.14t`), which correctly rejects `abi3` wheels. Without `-p`, wheelgap reads a `.python-version` file next to the lockfile (or `pyproject.toml`) if there is one, and otherwise uses the Python it is running on.
 
 ### In CI (GitHub Action)
 
 ```yaml
 - uses: actions/checkout@v7
-- uses: wheelgap/wheelgap@v0.4.0
+- uses: wheelgap/wheelgap@v0.5.0
   with:
     args: uv.lock -p 3.13 -t linux-x86_64,linux-aarch64
 ```
 
-The job fails when a dependency would build from source on a target you ship, for example when a dependency bump drops ARM wheels.
+The job fails when a dependency would build from source on a target you ship, for example when a dependency bump drops ARM wheels. The gap table also goes to the run's summary page (set `summary: false` to turn that off).
+
+Outside the Action, `--markdown` prints the same report as Markdown, for a job summary (`wheelgap --markdown >> "$GITHUB_STEP_SUMMARY"`) or a PR comment. With `--explain`, the rejected wheels go in a collapsed section.
 
 ### With pre-commit
 
 ```yaml
 repos:
   - repo: https://github.com/wheelgap/wheelgap
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: wheelgap
 ```
@@ -181,7 +192,7 @@ for r in wheelgap.check_lockfile("uv.lock", targets):  # markers and the uv grap
 python -m wheelgap.scan --top 5000 --out coverage.json
 ```
 
-This checks the latest release of the most-downloaded packages (from [top-pypi-packages](https://hugovk.dev/top-pypi-packages/)) against every platform, for Python 3.13, 3.14 and 3.14t by default, and writes one JSON file with per-platform totals. It's the data behind the [coverage tracker on the roadmap](https://github.com/wheelgap/wheelgap/discussions/43).
+This checks the latest release of the most-downloaded packages (from [top-pypi-packages](https://hugovk.dev/top-pypi-packages/)) against the eight common platforms (and Pyodide), for Python 3.13, 3.14 and 3.14t by default, and writes one JSON file with per-platform totals. It's the data behind the [coverage tracker on the roadmap](https://github.com/wheelgap/wheelgap/discussions/43).
 
 ## How it works
 
@@ -205,7 +216,7 @@ Sites like [pyreadiness.org](https://pyreadiness.org) and [free-threaded wheels]
 
 wheelgap is growing into **caniuse for Python wheels**: an open map of which packages have wheels for which platforms. The CLI stays focused, and around it come a nightly tracker of the most-used PyPI packages, a community knowledge base of workarounds, and campaigns to help upstream projects ship missing wheels. **[Read the roadmap and join the discussion →](https://github.com/wheelgap/wheelgap/discussions/43)**
 
-Next up for the CLI: iOS and Android targets (#11), private indexes (#19), and "nearest version with a wheel" hints (#20).
+Next up for the CLI: private indexes (#19), and "nearest version with a wheel" hints (#20).
 
 Contributions welcome. Issues labelled [good first issue](https://github.com/wheelgap/wheelgap/labels/good%20first%20issue) are a good start, and [CONTRIBUTING.md](CONTRIBUTING.md) has the 3-command dev setup. Questions are welcome in [Discussions](https://github.com/wheelgap/wheelgap/discussions).
 

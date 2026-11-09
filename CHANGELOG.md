@@ -3,8 +3,47 @@
 ## Unreleased
 
 - Read custom package categories in `Pipfile.lock` (such as `[docs]` or `[tests]`), not just default and develop. (#52)
+- `--dockerfile` follows named stages: with `FROM python:3.13-alpine AS base` and later `FROM base AS runtime`, the final stage is checked as `python:3.13-alpine`, through any chain of stages, keeping the platform that stage was built for (as Docker does). A name that's neither an earlier stage nor a python image gets a clear error. Line continuations now follow Docker's rules (blank and comment lines inside one, `# escape=`), and Python `from ... import` lines in heredocs are no longer mistaken for `FROM`. (#10)
+- iOS and Android targets (PEP 730 / PEP 738): `ios-arm64`, `ios-simulator-arm64`, `ios-simulator-x86_64`, `android-arm64` and `android-x86_64`, all at once with `-t mobile`. `--ios` and `--android-api` (or `ios` and `android-api` in `[tool.wheelgap]`) set the minimum versions, 13.0 and API level 24 by default. Like Pyodide, mobile installs only use wheels, and they need Python 3.13+. Out-of-range versions for `--glibc`, `--musl`, `--macos` and `--ios` (e.g. `2.3000000`, which never finished) are now errors. (#11)
+- `--markdown` prints the report as Markdown, and the GitHub Action now writes it to the run's summary page (`summary: false` turns that off). The step still passes or fails on the normal run. (#7)
+- New Linux targets for 32-bit ARM (`linux-armv7l`, e.g. Raspberry Pi OS), `ppc64le`, `s390x` and `riscv64`, each with a `musl-*` twin for Alpine, and their Docker names (`linux/arm/v7` and so on) in `-t` and `--dockerfile`. Plain `linux_armv7l` wheels, which PyPI allows for the Raspberry Pi, count on `linux-armv7l` as they do for pip, but not on `musl-armv7l`: they're glibc builds. `-t all` still means the eight common platforms; `-t everything` adds these. (#8)
+- Read package files from the `[metadata.files]` table in older `pdm.lock` files (PDM before 2.8) instead of looking them up on PyPI. (#67, thanks [@nxxis](https://github.com/nxxis))
+
+## 0.5.0 (2026-11-09)
+
+wheelgap now lives at [github.com/wheelgap/wheelgap](https://github.com/wheelgap/wheelgap). Old links redirect, but update `uses:` and pre-commit `repo:` lines when you next touch them.
+
+- Skip non-index Mercurial, Subversion and Bazaar dependencies (`hg`, `svn`, `bzr`) in `Pipfile.lock`, `pdm.lock` and `poetry.lock` instead of looking them up on PyPI. (#58, thanks [@chiragjangiir](https://github.com/chiragjangiir))
 - `--explain` shows which dependency pulls in each gap package for `uv.lock` inputs: the shortest path from your project or a dependency group, worked out per target (`via: myapp → uvicorn → uvloop`). `--json --explain` adds a matching `via` object keyed by target, like `rejected`. (#45, thanks [@YSWFelicity](https://github.com/YSWFelicity))
 - `-q` / `--quiet` prints only the gap summary and affected package names, and leaves clean runs silent. Set `quiet = true` in `[tool.wheelgap]` to use it by default. (#48, thanks [@Daiyuanranfeng](https://github.com/Daiyuanranfeng))
+
+### Fixed
+
+These came from independent second reviews of recent PRs, and a full audit of the codebase. (#55, #60)
+
+- **Version ranges are respected.** `numpy>=1.26,<2` (or `~=`, `==1.26.*`) used to check the latest release (numpy 2.x). wheelgap now checks the newest release that matches the range (not yet narrowed by each release's `requires-python`).
+- **uv.lock:** dependencies behind `[tool.uv] conflicts` (encoded as `extra == '...'` markers) were dropped as never installed, and path dependencies were treated as roots, so their dependencies counted everywhere. Markers with parts wheelgap can't know (extras, groups, `platform_release`, `platform_version`) now hold if they could hold for some value of those parts, while the platform and Python parts still apply. Poetry 1.x graphs also handle dependency cycles and version ranges on edges.
+- **poetry.lock:** Poetry 1.x locks (lock-version < 2.1) keep markers only on dependency edges, so Windows-only packages such as pywin32 were reported missing on Linux. They're now walked like uv.lock. Dict markers that leave out an always-installed group, and packages with no files recorded, are handled too.
+- **Free-threaded 3.15t `abi3t` wheels** (PEP 803) need `packaging` 26.3, which is now the minimum. `--explain` says when an `abi3t` wheel needs a newer CPython.
+- **Python 3.7** targets use CPython's `cp37m` ABI, so their wheels are recognised.
+- **PyPI lookups:** odd index responses give "unknown" instead of crashing; retries back off and honour `Retry-After`, retry dropped connections and skip permanent errors; an empty `WHEELGAP_INDEX_URL` means PyPI, and a `/simple` URL is a clear error; a missing pinned version says so ("version 1.0 not on index").
+- **requirements.txt:** `-rfile` without a space, `--hash` with a space, comments after a tab, and `name@url` without spaces are all read correctly.
+- **Output:** UTF-8 on Windows CI (no more "?" for ✓), `.python-version` files with a BOM, `--list-targets` uses the limits from `[tool.wheelgap]`, legacy `manylinux2014` wheels get the right `--explain` reason, more sdist formats are recognised, and `--macos 15` means 15.0.
+- `--pyodide-lock`: a package whose lookup failed (e.g. a mistyped pin) was reported as bundled and could pass. It's now `unknown`, which fails.
+- `pyodide-lock` in `[tool.wheelgap]` made every run without a matching Pyodide target exit 2. It's now quietly unused on those runs, and a relative path is read from the folder that holds `pyproject.toml`.
+- **Yanked files:** a release pinned with `==` whose files have all been yanked was reported as having no files ("can't install"). pip still installs it (PEP 592), so its files now count, judged per target: they count only when every file that target could use is yanked.
+- `pdm.lock`: packages with extras were listed twice (PDM writes one entry per extras variant). They now count once.
+- The summary line could leave "unknown" packages out of its counts. Each gap package is now counted once, under its worst status.
+- `quiet = true` in `[tool.wheelgap]` made `--json --explain` fail with a usage error. Quiet now only affects text output, `--no-quiet` turns it off for one run, and quiet runs still say why a package is unknown.
+- `--explain`'s `via:` could credit a dependency group for a package that is also a runtime dependency. The project's own dependencies are now preferred.
+- `--dockerfile` with an Alpine image plus `-t linux/arm64` checked glibc wheels. Docker platform names now keep the image's libc (musl).
+- `--dockerfile`: Alpine 3.12 and earlier are checked against musl 1.1, not 1.2.
+- `requirements.txt`: a bare VCS URL containing `@` (`git+ssh://git@github.com/...`) aborted the whole run. It's now skipped like other URLs.
+- `python -m wheelgap.scan` now refuses to write results when more than 5% of lookups fail (`--max-error-rate`), records `lookup_errors` and each target's glibc/musl/macOS limits, and no longer counts Python 2-only wheels as "pure".
+
+### Security
+
+- Every GitHub Action used by wheelgap's own workflows is pinned to a full commit SHA, with Dependabot keeping the pins current, and PyPI releases now publish only from a `v*` tag through a protected environment. (#64)
 
 ## 0.4.0 (2026-11-09)
 
