@@ -323,10 +323,32 @@ def test_dockerfiles_docker_rejects(tmp_path, text, message):
         read_dockerfile(_dockerfile(tmp_path, text))
 
 
-def test_ascii_whitespace_inside_a_line_separates_words(tmp_path):
+@pytest.mark.parametrize("space", ["\v", "\f", "\r"])
+def test_ascii_whitespace_inside_a_line_separates_words(tmp_path, space):
     # \v, \f and \r don't end a line for Docker (only \n does), but they do separate words, as spaces do.
-    text = "FROM python:3.13\vAS build\nFROM build\n"
-    assert read_dockerfile(_dockerfile(tmp_path, text)) == ImageTarget("3.13", "linux-x86_64")
+    path = tmp_path / "Dockerfile"
+    path.write_bytes(f"FROM python:3.13{space}AS build\nFROM build\n".encode())
+    assert read_dockerfile(path) == ImageTarget("3.13", "linux-x86_64")
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        # \r\r\n (CRLF written in text mode on Windows): every trailing \r goes, so the continuation holds.
+        (
+            b"FROM python:3.13-alpine\nRUN echo hi \\\r\r\nFROM python:3.12-slim\n",
+            ImageTarget("3.13", "musl-x86_64", musl="1.2"),
+        ),
+        (
+            b"FROM python:3.12 AS a\r\nFROM --platform=linux/arm64 \\\r\n python:3.11-slim\r\n",
+            ImageTarget("3.11", "linux-aarch64"),
+        ),
+    ],
+)
+def test_crlf_continuations(tmp_path, data, expected):
+    path = tmp_path / "Dockerfile"
+    path.write_bytes(data)
+    assert read_dockerfile(path) == expected
 
 
 def test_crlf_dockerfile_parses(tmp_path):

@@ -77,7 +77,7 @@ def _from_lines(text: str) -> list[str]:
     so a line in one that looks exactly like a FROM instruction (say, SQL's `FROM base` naming a
     stage) is still read as one: a known limit, pass -p/-t for such Dockerfiles.
     """
-    lines = [raw[:-1] if raw.endswith("\r") else raw for raw in text.split("\n")]
+    lines = [raw.rstrip("\r") for raw in text.split("\n")]  # Docker's trimNewline drops every trailing \r
     esc = re.escape(_escape_char(lines))
     continued = re.compile(rf"(?<!{esc}){esc}[ \t]*$")  # one escape char at the end, not two
     found = []
