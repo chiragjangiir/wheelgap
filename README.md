@@ -147,7 +147,7 @@ Docker platform names also work with `-t`, for example `-t linux/amd64,linux/arm
 
 ```yaml
 - uses: actions/checkout@v7
-- uses: wheelgap/wheelgap@v0.5.0
+- uses: wheelgap/wheelgap@v0.6.0
   with:
     args: uv.lock -p 3.13 -t linux-x86_64,linux-aarch64
 ```
@@ -161,7 +161,7 @@ Outside the Action, `--markdown` prints the same report as Markdown, for a job s
 ```yaml
 repos:
   - repo: https://github.com/wheelgap/wheelgap
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: wheelgap
 ```
@@ -198,7 +198,7 @@ This checks the latest release of the most-downloaded packages (from [top-pypi-p
 
 - **Lockfiles are read offline.** `uv.lock`, `pylock.toml`, `poetry.lock` and `pdm.lock` already record every file published for each pinned version. wheelgap parses the wheel filenames' tags with [`packaging`](https://packaging.pypa.io/) and checks them against the exact tag set each target accepts. That is the same logic pip and uv use to pick a wheel.
 - **`requirements.txt` and bare package names** are looked up on the PyPI JSON API. Feed it a fully pinned file (from `uv pip compile`, `pip-compile` or `uv export`): wheelgap checks the lines you give it and doesn't resolve dependencies.
-- **`Pipfile.lock`** reads both `default` and `develop` dependencies and looks up distribution filenames on PyPI for their pinned versions. Environment markers are preserved; Git, path, file and editable dependencies are skipped as non-index packages.
+- **`Pipfile.lock`** reads `default`, `develop` and any custom package categories (such as `docs` or `tests`) and looks up distribution filenames on PyPI for their pinned versions. Environment markers are preserved; Git, path, file and editable dependencies are skipped as non-index packages.
 - **Environment markers are respected.** A `pywin32 ; sys_platform == 'win32'` dependency won't show up as a Linux gap. For `uv.lock` the dependency graph is walked per target, so transitive platform-specific packages are handled too.
 - `--online` re-checks lockfile packages against PyPI. Use it when a project has uploaded new wheels for an existing version since you locked, or if your `uv.lock` was generated with `environments` restrictions.
 

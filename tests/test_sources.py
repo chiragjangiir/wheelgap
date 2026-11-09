@@ -232,6 +232,15 @@ def test_pipfile_lock_malformed_package_entry_raises(tmp_path):
         load_inputs([str(path)])
 
 
+@pytest.mark.parametrize("section", ["default", "develop", "docs"])
+@pytest.mark.parametrize("value", [None, [], "x"])
+def test_pipfile_lock_malformed_section_raises(tmp_path, section, value):
+    path = tmp_path / "Pipfile.lock"
+    path.write_text(json.dumps({"_meta": {}, section: value}), encoding="utf-8")
+    with pytest.raises(SourceError, match=f"{section} isn't a package section"):
+        load_inputs([str(path)])
+
+
 def test_pdm_lock_extras_variants_count_once(tmp_path):
     # PDM writes one entry per extras variant (seen in PDM's own lockfile for coverage[toml]).
     (tmp_path / "pdm.lock").write_text(

@@ -331,12 +331,13 @@ def parse_pipfile_lock(path: Path) -> Source:
     data = json.loads(path.read_text(encoding="utf-8"))
     pkgs: list[Package] = []
     seen: dict[tuple[str, str | None], Package] = {}
-    sections = [s for s in ("default", "develop") if s in data and isinstance(data[s], dict)]
     for key, val in data.items():
-        if key != "_meta" and key not in ("default", "develop") and isinstance(val, dict):
-            sections.append(key)
+        if key != "_meta" and not isinstance(val, dict):
+            raise SourceError(f"{path.name}: {key} isn't a package section")
+    sections = [s for s in ("default", "develop") if s in data]
+    sections += [key for key in data if key not in ("_meta", "default", "develop")]
     for section in sections:
-        for name, p in data.get(section, {}).items():
+        for name, p in data[section].items():
             if not isinstance(p, dict):
                 raise SourceError(f"{path.name}: {section}.{name} isn't a package entry")
             version = p.get("version")
