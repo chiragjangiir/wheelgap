@@ -85,7 +85,7 @@ def _from_lines(text: str) -> list[str]:
 
     def finish(instruction: str, joined: bool) -> None:
         # Docker splits the keyword off on ASCII whitespace only, so `FROM<U+00A0>python` isn't a FROM to it.
-        words = re.split(r"[ \t]+", instruction, maxsplit=1)
+        words = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
         if words[0].upper() != "FROM" and re.match(r"(?i)FROM\s", words[0]) and not _PY_IMPORT_RE.match(instruction):
             raise DockerfileError(
                 f"unknown instruction {words[0]!r} (Docker splits instructions on ASCII whitespace only)"
@@ -150,8 +150,8 @@ def _unquote(value: str, args: str) -> str:
 
 def _split_from(args: str) -> tuple[str, str | None, str | None]:
     """`[--platform=P] image [AS name]` -> (image, platform, stage name), rejecting what Docker rejects."""
-    stripped = args.strip(" \t")
-    words = re.split(r"[ \t]+", stripped) if stripped else []
+    stripped = args.strip(" \t\v\f\r")
+    words = re.split(r"[ \t\v\f\r]+", stripped) if stripped else []
     platform = None
     seen_platform = False
     while words and words[0].startswith("--"):
