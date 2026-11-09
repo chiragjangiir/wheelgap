@@ -143,7 +143,9 @@ def _split_from(args: str) -> tuple[str, str | None, str | None]:
     if len(words) == 3 and words[1].upper() == "AS":
         stage = words[2].lower()
         if not re.fullmatch(r"[a-z][a-z0-9-_.]*", stage):  # BuildKit's parseBuildStageName
-            raise DockerfileError(f"FROM {args}: invalid stage name {words[2]!r}")
+            raise DockerfileError(
+                f"FROM {args}: invalid stage name {words[2]!r} (if this line is inside a heredoc, pass -p/-t instead)"
+            )
         return words[0], platform, stage
     raise DockerfileError(
         f"FROM {args}: expected 'IMAGE' or 'IMAGE AS NAME' (if this line is inside a heredoc, pass -p/-t instead)"
